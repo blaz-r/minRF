@@ -1,15 +1,23 @@
-# implementation of Rectified Flow for simple minded people like me.
+# implementation of Rectified Flow in latent space based on minRF https://github.com/cloneofsimo/minRF/blob/main/rf.py
 import argparse
 
 import torch
 
 
 class RF:
-    def __init__(self, model, ln=True):
+    def __init__(self, model, vae, ln=True):
         self.model = model
+        self.vae = vae
         self.ln = ln
 
     def forward(self, x, cond):
+        # embed the image and use that as target
+        with torch.no_grad():
+            x = (
+                self.vae.encode(x).latent_dist.sample()
+                - self.vae.config.get("shift_factor", 0)
+            ) * self.vae.config.scaling_factor
+
         b = x.size(0)
         if self.ln:
             nt = torch.randn((b,)).to(x.device)
@@ -30,7 +38,15 @@ class RF:
         b = z.size(0)
         dt = 1.0 / sample_steps
         dt = torch.tensor([dt] * b).to(z.device).view([b, *([1] * len(z.shape[1:]))])
-        images = [z]
+        # decoder latent back to image space
+        with torch.no_grad():
+            images = [
+                self.vae.decode(
+                    z / self.vae.config.scaling_factor
+                    + self.vae.config.get("shift_factor", 0)
+                ).sample
+            ]
+
         for i in range(sample_steps, 0, -1):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device)
@@ -41,12 +57,19 @@ class RF:
                 vc = vu + cfg * (vc - vu)
 
             z = z - dt * vc
-            images.append(z)
+
+            with torch.no_grad():
+                img_z = self.vae.decode(
+                    z / self.vae.config.scaling_factor
+                    + self.vae.config.get("shift_factor", 0)
+                ).sample
+            images.append(img_z)
         return images
 
 
 if __name__ == "__main__":
-    # train class conditional RF on mnist.
+    # train class conditional latent RF on mnist.
+    from pathlib import Path
     import numpy as np
     import torch.optim as optim
     from PIL import Image
@@ -57,59 +80,94 @@ if __name__ == "__main__":
 
     import wandb
     from dit import DiT_Llama
+    from diffusers import AutoencoderKL
 
-    parser = argparse.ArgumentParser(description="use cifar?")
+    parser = argparse.ArgumentParser(description="Latent minimal rectified flow")
     parser.add_argument("--cifar", action="store_true")
+    parser.add_argument("--vae_type", choices=["sdxl", "sd3.5"], default="sd3.5")
     args = parser.parse_args()
     CIFAR = args.cifar
+
+    print(f"Using {args.vae_type} vae")
+    if args.vae_type == "sdxl":
+        vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae")
+    elif args.vae_type == "sd3.5":
+        vae = AutoencoderKL.from_pretrained(
+            "stabilityai/stable-diffusion-3.5-medium", subfolder="vae"
+        )
+    else:
+        raise ValueError(f"Unknown vae type {args.vae_type}")
+    vae_downscale = 8
+
+    vae.cuda()
+    for param in vae.parameters():
+        param.requires_grad = False
 
     if CIFAR:
         dataset_name = "cifar"
         fdatasets = datasets.CIFAR10
+        img_size = 32
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.RandomCrop(32),
+                transforms.Resize(img_size),
                 transforms.RandomHorizontalFlip(),
                 transforms.Normalize((0.5,), (0.5,)),
             ]
         )
-        channels = 3
         model = DiT_Llama(
-            channels, 32, dim=256, n_layers=10, n_heads=8, num_classes=10
+            vae.config.latent_channels,
+            32 // vae_downscale,
+            dim=256,
+            n_layers=10,
+            n_heads=8,
+            num_classes=10,
+            patch_size=1,
         ).cuda()
 
     else:
         dataset_name = "mnist"
         fdatasets = datasets.MNIST
+        img_size = 32
         transform = transforms.Compose(
             [
+                transforms.Grayscale(
+                    num_output_channels=3
+                ),  # ensure 3 channels for VAE
                 transforms.ToTensor(),
                 transforms.Pad(2),
                 transforms.Normalize((0.5,), (0.5,)),
             ]
         )
-        channels = 1
         model = DiT_Llama(
-            channels, 32, dim=64, n_layers=6, n_heads=4, num_classes=10
+            vae.config.latent_channels,
+            32 // vae_downscale,
+            dim=64,
+            n_layers=6,
+            n_heads=4,
+            num_classes=10,
+            patch_size=1,
         ).cuda()
 
     model_size = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of parameters: {model_size}, {model_size / 1e6}M")
 
-    rf = RF(model)
-    optimizer = optim.Adam(model.parameters(), lr=5e-4)
+    rf = RF(model, vae)
+    optimizer = optim.Adam(model.parameters(), lr=4e-5)
     criterion = torch.nn.MSELoss()
 
     mnist = fdatasets(root="./data", train=True, download=True, transform=transform)
     dataloader = DataLoader(mnist, batch_size=256, shuffle=True, drop_last=True)
 
-    wandb.init(project=f"rf_{dataset_name}")
-
+    exp_name = f"latent-rf-64p1-{dataset_name}-{args.vae_type}"
+    Path(f"./contents/{exp_name}").mkdir(parents=True, exist_ok=True)
+    wandb.init(project=f"diff_exp", name=exp_name)
     for epoch in range(100):
+        rf.vae.eval()
+        rf.model.train()
         lossbin = {i: 0 for i in range(10)}
         losscnt = {i: 1e-6 for i in range(10)}
-        for i, (x, c) in tqdm(enumerate(dataloader)):
+        for i, (x, c) in tqdm(enumerate(dataloader), total=len(dataloader)):
             x, c = x.cuda(), c.cuda()
             optimizer.zero_grad()
             loss, blsct = rf.forward(x, c)
@@ -130,11 +188,17 @@ if __name__ == "__main__":
         wandb.log({f"lossbin_{i}": lossbin[i] / losscnt[i] for i in range(10)})
 
         rf.model.eval()
+        rf.vae.eval()
         with torch.no_grad():
             cond = torch.arange(0, 16).cuda() % 10
             uncond = torch.ones_like(cond) * 10
 
-            init_noise = torch.randn(16, channels, 32, 32).cuda()
+            init_noise = torch.randn(
+                16,
+                vae.config.latent_channels,
+                img_size // vae_downscale,
+                img_size // vae_downscale,
+            ).cuda()
             images = rf.sample(init_noise, cond, uncond)
             # image sequences to gif
             gif = []
@@ -148,7 +212,7 @@ if __name__ == "__main__":
                 gif.append(Image.fromarray(img))
 
             gif[0].save(
-                f"contents/sample_{epoch}.gif",
+                f"contents/{exp_name}/sample_{epoch}.gif",
                 save_all=True,
                 append_images=gif[1:],
                 duration=100,
@@ -156,6 +220,4 @@ if __name__ == "__main__":
             )
 
             last_img = gif[-1]
-            last_img.save(f"contents/sample_{epoch}_last.png")
-
-        rf.model.train()
+            last_img.save(f"contents/{exp_name}/sample_{epoch}_last.png")
