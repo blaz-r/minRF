@@ -284,8 +284,8 @@ class DiT_Llama(nn.Module):
         c = self.out_channels
         p = self.patch_size
         h = w = int(x.shape[1] ** 0.5)
-        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        x = torch.einsum("nhwpqc->nchpwq", x)
+        x = x.reshape(shape=(x.shape[0], h, w, c, p, p))
+        x = torch.einsum("nhwcpq->nchpwq", x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
