@@ -1,3 +1,25 @@
+# Minimal Implementation of Latent Scalable Rectified Flow Transformers (based on minRF by @cloneofsimo)
+
+This module extends minRF to operate directly in latent space.
+
+A VAE from either Stable Diffusion 3.5 or SDXL is used to encode images into latents and decode outputs back to images. The VAE variant is controlled via the `--vae_type` flag (`sd3.5` by default, the other option is `sdxl`).
+
+Latent RF on mnist (30 epoch):
+
+<p align="center">
+  <img src="contents/30_latent.gif" alt="large" width="300">
+  <img src="contents/30_latent.png" alt="large" width="300">
+</p>
+
+Latent RF on cifar (97 epoch):
+
+<p align="center">
+  <img src="contents/cifar_97_latent.gif" alt="large" width="300">
+  <img src="contents/cifar_97_latent.png" alt="large" width="300">
+</p>
+
+## Following is the original README from cloneofsimo/minRF
+
 # Minimal Implementation of Scalable Rectified Flow Transformers
 
 <p align="center">
