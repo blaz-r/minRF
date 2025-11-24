@@ -106,7 +106,7 @@ if __name__ == "__main__":
     if CIFAR:
         dataset_name = "cifar"
         fdatasets = datasets.CIFAR10
-        img_size = 32
+        img_size = 64
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -117,7 +117,7 @@ if __name__ == "__main__":
         )
         model = DiT_Llama(
             vae.config.latent_channels,
-            32 // vae_downscale,
+            img_size // vae_downscale,
             dim=256,
             n_layers=10,
             n_heads=8,
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         )
         model = DiT_Llama(
             vae.config.latent_channels,
-            32 // vae_downscale,
+            img_size // vae_downscale,
             dim=64,
             n_layers=6,
             n_heads=4,
@@ -153,13 +153,13 @@ if __name__ == "__main__":
     print(f"Number of parameters: {model_size}, {model_size / 1e6}M")
 
     rf = RF(model, vae)
-    optimizer = optim.Adam(model.parameters(), lr=4e-5)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
     criterion = torch.nn.MSELoss()
 
     mnist = fdatasets(root="./data", train=True, download=True, transform=transform)
     dataloader = DataLoader(mnist, batch_size=256, shuffle=True, drop_last=True)
 
-    exp_name = f"latent-rf-64p1-{dataset_name}-{args.vae_type}"
+    exp_name = f"latent-rf-{dataset_name}-{args.vae_type}"
     Path(f"./contents/{exp_name}").mkdir(parents=True, exist_ok=True)
     wandb.init(project=f"diff_exp", name=exp_name)
     for epoch in range(100):
